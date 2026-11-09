@@ -3,7 +3,8 @@
 import { data, save, newId, logActivity, getTopic, getPaper, topicPapers } from "./store.js";
 import { SOURCES, keysOf, mergeRecord } from "./sources.js";
 import { buildQueries } from "./filters.js";
-import { extractPaper, compareFindings, findGaps, writeReview, aiAvailable } from "./ai.js";
+import { extractPaper, compareFindings, findGaps, writeReview } from "./ai.js";
+import { aiAvailable, activeConfig } from "./settings.js";
 
 const DAY = 86_400_000;
 
@@ -19,7 +20,7 @@ function pump() {
     if (!paper || paper.extractionStatus !== "pending") continue;
     active++;
     extractPaper(paper)
-      .then(({ engine, extraction }) => Object.assign(paper, { extraction, extractionEngine: engine, extractionStatus: "done", extractionError: null }))
+      .then(({ engine, model, extraction }) => Object.assign(paper, { extraction, extractionEngine: engine, extractionModel: model, extractionStatus: "done", extractionError: null }))
       .catch((err) => Object.assign(paper, { extractionStatus: "error", extractionError: err.message }))
       .finally(() => {
         active--;
@@ -152,7 +153,8 @@ export function startAnalysis(topic, type, paperIds) {
     type,
     status: "running",
     createdAt: new Date().toISOString(),
-    engine: aiAvailable() ? "claude" : "heuristic",
+    engine: aiAvailable() ? "ai" : "heuristic",
+    model: aiAvailable() ? activeConfig().model : null,
     references: papers.map((p, i) => ({ n: i + 1, paperId: p.id, text: formatReference(p), url: p.url })),
     result: null,
   };
@@ -163,8 +165,8 @@ export function startAnalysis(topic, type, paperIds) {
   const searchInfo = `Sources: ${topic.sources.map((s) => SOURCES[s].label).join(" and ")}. PubMed query: ${q.pubmed}. Europe PMC query: ${q.europepmc}. Records retrieved by automated monitoring up to ${new Date().toISOString().slice(0, 10)}; ${papers.length} records included. Data were extracted from abstracts only.`;
 
   RUNNERS[type](topic, papers, refNo, searchInfo)
-    .then(({ engine, result }) => {
-      Object.assign(analysis, { status: "done", engine, result });
+    .then(({ engine, model, result }) => {
+      Object.assign(analysis, { status: "done", engine, model: model ?? null, result });
       logActivity(topic.id, { compare: "Comparison", gaps: "Gap analysis", review: "Literature review" }[type] + ` ready (${papers.length} papers)`, "success");
     })
     .catch((err) => Object.assign(analysis, { status: "error", error: err.message }))

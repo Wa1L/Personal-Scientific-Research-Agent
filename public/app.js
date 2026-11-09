@@ -4,7 +4,8 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 const S = {
-  meta: { domains: [], studyTypes: [], sources: [], ai: {} },
+  meta: { domains: [], studyTypes: [], sources: [] },
+  ai: { providers: [] },
   topics: [],
   activity: [],
   busy: false,
@@ -86,6 +87,7 @@ const ICONS = {
   edit: '<path d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4"/>',
   trash: '<path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13"/>',
   spark: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-2.8 1.2V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-2.8-1.2l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0-1.2-2.8H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.2-2.8l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 2.8-1.2V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.8 1.2l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0 1.2 2.8h.1a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   home: '<path d="M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4v-6h-6v6H5a1 1 0 0 1-1-1z"/>',
 };
 const icon = (name, size = 16, cls = "", fill = "none") =>
@@ -112,8 +114,10 @@ const byline = (p) => {
 const fmtN = (e) => (e?.sampleSize != null ? e.sampleSize.toLocaleString() : "");
 const LEVELS = { high: ["High", "green"], moderate: ["Moderate", "blue"], low: ["Low", "gold"], very_low: ["Very low", "red"] };
 const levelPill = (e) => (LEVELS[e?.evidenceLevel] ? `<span class="pill ${LEVELS[e.evidenceLevel][1]}">${LEVELS[e.evidenceLevel][0]} certainty</span>` : "");
-const enginePill = (engine) =>
-  engine === "claude" ? `<span class="pill accent">${icon("spark", 12)} Claude</span>` : `<span class="pill gold" title="Rule-based fallback — no Anthropic API key configured">Heuristic</span>`;
+const enginePill = (engine, model) =>
+  engine === "heuristic"
+    ? `<span class="pill gold" title="Rule-based fallback — no AI provider was connected">Heuristic</span>`
+    : `<span class="pill accent" title="Analysed by this model">${icon("spark", 12)} ${esc(model || "Claude")}</span>`;
 const DIRS = { benefit: "Benefit", harm: "Harm", no_difference: "No difference", association: "Association", mixed: "Mixed", unclear: "Unclear" };
 
 const cites = (refs) => (refs || []).map((n) => `<button class="cite" data-action="cite" data-n="${n}">${n}</button>`).join("");
@@ -167,7 +171,7 @@ function markdown(md) {
 // -------------------------------------------------------------- sidebar
 
 function renderSidebar() {
-  const ai = S.meta.ai;
+  const ai = S.ai;
   $("#sidebar").innerHTML = `
     <div class="brand">
       <div class="brand-mark">R</div>
@@ -185,10 +189,10 @@ function renderSidebar() {
       )
       .join("")}
     <button class="nav-item nav-add" data-action="new-topic">${icon("plus", 14)} New topic</button>
-    <div class="engine">
-      <strong><span class="dot ${ai.available ? "live" : ""}"></span>${ai.available ? "Claude connected" : "Heuristic mode"}</strong>
-      ${ai.available ? esc(ai.model) : "Set ANTHROPIC_API_KEY and restart to enable AI extraction and synthesis."}
-    </div>`;
+    <button class="engine" data-action="settings" title="AI settings">
+      <strong><span class="dot ${ai.available ? "live" : ""}"></span><span class="grow">${ai.available ? esc(ai.label) : "No AI connected"}</span>${icon("gear", 15)}</strong>
+      ${ai.available ? esc(ai.model) : "Heuristic mode. Connect Claude, OpenAI, Gemini or another model."}
+    </button>`;
 }
 
 // ------------------------------------------------------------- overview
@@ -371,13 +375,13 @@ function renderEvidence() {
   const val = { year: (p) => p.year || 0, n: (p) => p.extraction.sampleSize ?? -1, design: (p) => p.extraction.studyDesign, study: (p) => p.authors[0] || "" }[key];
   rows.sort((a, b) => (val(a) > val(b) ? 1 : val(a) < val(b) ? -1 : 0) * dir);
   const th = (k, label) => `<th data-sort="${k}" data-action="sort">${label}${key === k ? (dir > 0 ? " ↑" : " ↓") : ""}</th>`;
-  const heuristic = rows.some((p) => p.extractionEngine !== "claude");
+  const heuristic = rows.some((p) => p.extractionEngine === "heuristic");
   return `<div class="toolbar">
       <span class="sub" style="margin:0">${rows.length} stud${rows.length === 1 ? "y" : "ies"} · extracted from abstracts</span>
       <span class="spacer"></span>
       <a class="btn sm" href="/api/topics/${S.topicId}/evidence.csv">${icon("down", 14)} Export CSV</a>
     </div>
-    ${heuristic ? `<div class="banner info">Some rows were filled by rule-based extraction, which only detects study design, sample size and result sentences. Connect Claude for full extraction.</div>` : ""}
+    ${heuristic ? `<div class="banner info">Some rows were filled by rule-based extraction, which only detects study design, sample size and result sentences. ${S.ai.available ? `<button class="btn sm" data-action="reextract-all" style="margin-left:auto">Re-extract with ${esc(S.ai.model)}</button>` : `<button class="btn sm" data-action="settings" style="margin-left:auto">Connect an AI model</button>`}</div>` : ""}
     <div class="card table-wrap"><table class="ev">
       <thead><tr>${th("study", "Study")}${th("design", "Design")}${th("n", "N")}<th>Population</th><th>Intervention / exposure</th><th>Key results</th><th>Conclusion</th><th>Certainty</th></tr></thead>
       <tbody>${rows
@@ -419,7 +423,7 @@ function renderAnalysis(type) {
 
   const head = `<div class="analysis-head">
       ${list.length > 1 ? `<select class="input" id="history" data-type="${type}">${list.map((a) => `<option value="${a.id}" ${a.id === current.id ? "selected" : ""}>${new Date(a.createdAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })} · ${a.references.length} papers</option>`).join("")}</select>` : `<span class="sub" style="margin:0">${new Date(current.createdAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })} · ${current.references.length} papers</span>`}
-      ${enginePill(current.engine)}
+      ${enginePill(current.engine, current.model)}
       <span class="spacer"></span>
       ${type === "review" && current.status === "done" ? `<a class="btn sm" href="/api/analyses/${current.id}/review.md">${icon("down", 14)} Markdown</a>` : ""}
       <button class="btn ghost sm danger" data-action="delete-analysis" data-id="${current.id}" title="Delete">${icon("trash", 14)}</button>
@@ -501,7 +505,7 @@ function renderDrawer() {
         ${e ? `<span class="pill accent">${esc(e.studyDesign)}</span>` : ""}${levelPill(e)}
         ${p.isPreprint ? `<span class="pill red">Preprint — not peer reviewed</span>` : ""}
         ${p.sources.map((s) => `<span class="pill outline">${s === "pubmed" ? "PubMed" : "Europe PMC"}</span>`).join("")}
-        ${e ? enginePill(p.extractionEngine) : ""}
+        ${e ? enginePill(p.extractionEngine, p.extractionModel) : ""}
       </div>
       ${p.extractionStatus === "error" ? `<div class="banner err" style="margin-top:14px">Extraction failed: ${esc(p.extractionError)}</div>` : ""}
       ${e ? `
@@ -586,6 +590,79 @@ function updatePreview() {
   }, 250);
 }
 
+// ------------------------------------------------------------- settings
+
+function openSettings() {
+  const ai = S.ai;
+  S.aiForm = { provider: ai.provider === "none" ? "anthropic" : ai.provider };
+  $("#modal").innerHTML = `<div class="modal"><div class="scrim" data-action="close-modal"></div>
+    <form id="settings-form">
+      <div class="modal-head"><h2>AI model</h2><p class="sub">Choose which model reads the abstracts and writes comparisons, gap analyses and reviews.</p></div>
+      <div class="modal-body">
+        <div class="field"><div class="label">Provider</div><div class="chips">${ai.providers.map((p) => `<button type="button" class="chip" data-action="provider" data-id="${p.id}">${esc(p.label)}</button>`).join("")}</div></div>
+        <div class="field"><label for="s-key">API key</label><input class="input" id="s-key" name="apiKey" type="password" autocomplete="off" spellcheck="false"><div class="hint" id="s-key-hint"></div></div>
+        <div class="field" id="s-url-field"><label for="s-url">Base URL</label><input class="input" id="s-url" name="baseUrl" spellcheck="false" placeholder="https://your-server.example/v1"><div class="hint">The address of an OpenAI-compatible API, ending before <code>/chat/completions</code>.</div></div>
+        <div class="field"><label for="s-model">Model</label>
+          <div style="display:flex;gap:8px"><input class="input" id="s-model" name="model" list="s-models" spellcheck="false" autocomplete="off"><button type="button" class="btn" data-action="load-models">Load list</button></div>
+          <datalist id="s-models"></datalist><div class="hint" id="s-model-hint"></div></div>
+        <div id="s-result"></div>
+        <p class="hint">The key is saved on this computer only, in the app's data folder, and is sent to nothing but the provider you choose.${ai.source === "env" ? " The current configuration comes from environment variables; saving here overrides it." : ""}</p>
+      </div>
+      <div class="modal-foot">
+        ${ai.source === "settings" ? `<button type="button" class="btn ghost danger" data-action="disconnect-ai" style="margin-right:auto">Disconnect</button>` : ""}
+        <button type="button" class="btn ghost" data-action="close-modal">Cancel</button>
+        <button type="button" class="btn" data-action="test-ai">Test connection</button>
+        <button class="btn primary">Save</button>
+      </div>
+    </form></div>`;
+  const form = $("#settings-form");
+  form.baseUrl.value = ai.baseUrl || "";
+  form.model.value = ai.model || "";
+  showProvider(true);
+}
+
+function showProvider(keepValues) {
+  const form = $("#settings-form");
+  const p = S.ai.providers.find((x) => x.id === S.aiForm.provider);
+  const isCurrent = S.ai.provider === p.id;
+  for (const el of form.querySelectorAll("[data-action=provider]")) el.classList.toggle("on", el.dataset.id === p.id);
+  if (!keepValues || !isCurrent) {
+    form.baseUrl.value = isCurrent ? S.ai.baseUrl : p.baseUrl;
+    form.model.value = isCurrent ? S.ai.model : p.defaultModel;
+    form.apiKey.value = "";
+    $("#s-models").innerHTML = "";
+  }
+  $("#s-url-field").hidden = p.kind !== "openai";
+  form.apiKey.placeholder = isCurrent && S.ai.hasKey ? "Saved — leave blank to keep it" : p.keyOptional ? "Optional for this provider" : "Paste your key";
+  $("#s-key-hint").textContent = p.id === "ollama" ? "Ollama runs on your own machine and needs no key." : "";
+  $("#s-model-hint").textContent = p.defaultModel ? `Default: ${p.defaultModel}.` : "Type the model name exactly as the provider lists it, or load the list.";
+  $("#s-result").innerHTML = "";
+}
+
+function settingsBody() {
+  const form = $("#settings-form");
+  return { provider: S.aiForm.provider, apiKey: form.apiKey.value.trim(), baseUrl: form.baseUrl.value.trim(), model: form.model.value.trim() };
+}
+
+async function withButton(el, label, fn) {
+  const original = el.innerHTML;
+  el.disabled = true;
+  el.innerHTML = `${icon("refresh", 14, "spin")} ${label}`;
+  try {
+    await fn();
+  } catch (err) {
+    $("#s-result").innerHTML = `<div class="banner err" style="margin:0">${esc(err.message)}</div>`;
+  } finally {
+    el.disabled = false;
+    el.innerHTML = original;
+  }
+}
+
+async function reloadSettings() {
+  S.ai = await api("/settings");
+  renderSidebar();
+}
+
 // --------------------------------------------------------------- render
 
 function render() {
@@ -624,6 +701,33 @@ const actions = {
   "new-topic": () => openForm(),
   "edit-topic": () => openForm(topic()),
   "close-modal": () => ($("#modal").innerHTML = ""),
+  settings: () => openSettings(),
+  provider(el) {
+    S.aiForm.provider = el.dataset.id;
+    showProvider();
+  },
+  "load-models": (el) =>
+    withButton(el, "Loading", async () => {
+      const { models } = await api("/settings/models", { method: "POST", body: settingsBody() });
+      $("#s-models").innerHTML = models.map((m) => `<option value="${esc(m)}">`).join("");
+      $("#s-result").innerHTML = `<div class="banner ok" style="margin:0">${models.length} models available. Click the Model field to choose one.</div>`;
+    }),
+  "test-ai": (el) =>
+    withButton(el, "Testing", async () => {
+      await api("/settings/test", { method: "POST", body: settingsBody() });
+      $("#s-result").innerHTML = `<div class="banner ok" style="margin:0">Connected — the model answered.</div>`;
+    }),
+  async "disconnect-ai"() {
+    await api("/settings", { method: "PUT", body: { provider: "none" } });
+    $("#modal").innerHTML = "";
+    await reloadSettings();
+    render();
+  },
+  async "reextract-all"() {
+    const { queued } = await api(`/topics/${S.topicId}/reextract`, { method: "POST" });
+    toast(`Re-extracting ${queued} paper${queued === 1 ? "" : "s"}`);
+    await refresh();
+  },
   "close-drawer": () => {
     S.drawerId = null;
     renderDrawer();
@@ -748,8 +852,18 @@ document.addEventListener("change", (ev) => {
 document.addEventListener(
   "submit",
   guard(async (ev) => {
-    if (ev.target.id !== "topic-form") return;
     ev.preventDefault();
+    if (ev.target.id === "settings-form") {
+      await api("/settings", { method: "PUT", body: settingsBody() }).catch((err) => {
+        $("#s-result").innerHTML = `<div class="banner err" style="margin:0">${esc(err.message)}</div>`;
+        throw err;
+      });
+      $("#modal").innerHTML = "";
+      await reloadSettings();
+      render();
+      return toast(`Using ${S.ai.model}`);
+    }
+    if (ev.target.id !== "topic-form") return;
     const f = readForm();
     const saved = f.id ? await api(`/topics/${f.id}`, { method: "PUT", body: f }) : await api("/topics", { method: "POST", body: f });
     $("#modal").innerHTML = "";
@@ -768,5 +882,5 @@ document.addEventListener("keydown", (ev) => {
 
 window.addEventListener("hashchange", route);
 
-S.meta = await api("/meta");
+[S.meta, S.ai] = await Promise.all([api("/meta"), api("/settings")]);
 route();

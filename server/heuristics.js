@@ -1,4 +1,4 @@
-// Rule-based fallbacks used when no Claude credentials are configured.
+// Rule-based fallbacks used when no AI provider is configured.
 // They only surface what is literally in the abstract; results are labelled
 // "heuristic" in the UI so they are never mistaken for model analysis.
 
@@ -100,7 +100,7 @@ export function heuristicCompare(papers) {
     summary:
       `${papers.length} studies compared: ${designs.map(([d, n]) => `${n} × ${d.toLowerCase()}`).join(", ")}.` +
       (sizes.length ? ` Reported sample sizes range from ${Math.min(...sizes).toLocaleString()} to ${Math.max(...sizes).toLocaleString()}.` : "") +
-      " Agreement and conflict between findings need model analysis — add an Anthropic API key to enable it.",
+      " Agreement and conflict between findings need model analysis — connect an AI provider in Settings to enable it.",
     agreements: [],
     conflicts: [],
     methodDifferences: designs.length > 1
@@ -126,7 +126,7 @@ export function heuristicGaps(papers) {
   if (!/child|pediatric|paediatric|adolescent/i.test(blob)) add("Pediatric populations", "No study mentions children or adolescents.", "Population", "low");
   if (!/older adults|elderly|aged 65|geriatric/i.test(blob)) add("Older adults", "No study mentions older or elderly populations.", "Population", "low");
   return {
-    overview: "Rule-based screen of study designs, sample sizes and populations mentioned in the abstracts. Add an Anthropic API key for a reasoned gap analysis.",
+    overview: "Rule-based screen of study designs, sample sizes and populations mentioned in the abstracts. Connect an AI provider in Settings for a reasoned gap analysis.",
     gaps,
   };
 }
@@ -135,7 +135,7 @@ export function heuristicReview(topic, papers, refNo) {
   const cite = (p) => `[${refNo.get(p.id)}]`;
   const years = papers.map((p) => p.year).filter(Boolean);
   const out = [`# ${topic.name}: literature summary`, ""];
-  out.push("## Scope", "", `This summary covers ${papers.length} publications${years.length ? ` (${[...new Set([Math.min(...years), Math.max(...years)])].join("–")})` : ""} retrieved for the query “${topic.query}”. It was assembled by rules from abstracts, without model analysis; add an Anthropic API key to generate a narrative review.`, "");
+  out.push("## Scope", "", `This summary covers ${papers.length} publications${years.length ? ` (${[...new Set([Math.min(...years), Math.max(...years)])].join("–")})` : ""} retrieved for the query “${topic.query}”. It was assembled by rules from abstracts, without model analysis; connect an AI provider in Settings to generate a narrative review.`, "");
   out.push("## Evidence base", "");
   const groups = count(papers, designOf);
   for (const [d, n] of groups) out.push(`- **${d}**: ${n}`);

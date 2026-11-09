@@ -1,25 +1,41 @@
-// Claude-backed analysis: per-paper extraction and corpus-level synthesis
-// (comparison, research gaps, literature review). Falls back to rule-based
-// heuristics when no Anthropic credentials are configured.
+// Model-backed analysis: per-paper extraction and corpus-level synthesis
+// (comparison, research gaps, literature review). Works with Anthropic's
+// Messages API or any OpenAI-compatible chat completions endpoint (OpenAI,
+// Gemini, OpenRouter, Ollama, ...). Falls back to rule-based heuristics when
+// no provider is configured.
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
+import { activeConfig, aiAvailable, problem } from "./settings.js";
 import { heuristicExtract, heuristicCompare, heuristicGaps, heuristicReview } from "./heuristics.js";
 
-export const MODEL = process.env.ANTHROPIC_MODEL || "claude-opus-5-5";
-// Biomedical abstracts can occasionally trip safety classifiers. With
-// server-side fallbacks the API re-runs a declined request on another model
-// instead of failing. Set ANTHROPIC_REFUSAL_FALLBACK=off to disable.
-const USE_FALLBACK = process.env.ANTHROPIC_REFUSAL_FALLBACK !== "off";
+export { aiAvailable };
 
-export const aiAvailable = () => Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+// ---------------------------------------------------------------- Anthropic
 
-let client;
-const anthropic = () => (client ??= new Anthropic({ maxRetries: 4 }));
+// Biomedical abstracts can occasionally trip safety classifiers. On the models
+// that support it, server-side fallbacks re-run a declined request on another
+// model instead of failing. Set ANTHROPIC_REFUSAL_FALLBACK=off to disable.
+const FALLBACK_MODELS = /^claude-(?:fable-5-[12]|opus-5(?:-5)?|sonnet-5-5)$/;
+const useFallback = (model) => process.env.ANTHROPIC_REFUSAL_FALLBACK !== "off" && FALLBACK_MODELS.test(model);
 
-async function complete({ system, user, schema, effort, maxTokens = 32000 }) {
+const clients = new Map();
+function anthropic(cfg) {
+  if (!clients.has(cfg.apiKey)) clients.set(cfg.apiKey, new Anthropic({ apiKey: cfg.apiKey, maxRetries: 4 }));
+  return clients.get(cfg.apiKey);
+}
+
+function anthropicError(err) {
+  if (err instanceof Anthropic.AuthenticationError) return new Error("Anthropic rejected the API key.");
+  if (err instanceof Anthropic.NotFoundError) return new Error("Anthropic does not recognise that model name.");
+  if (err instanceof Anthropic.RateLimitError) return new Error("Anthropic rate limit reached; try again shortly.");
+  if (err instanceof Anthropic.APIError) return new Error(`Anthropic API error ${err.status ?? ""}: ${err.message}`);
+  return err;
+}
+
+async function anthropicComplete(cfg, { system, user, schema, effort, maxTokens }) {
   const params = {
-    model: MODEL,
+    model: cfg.model,
     max_tokens: maxTokens,
     system,
     messages: [{ role: "user", content: user }],
@@ -27,19 +43,128 @@ async function complete({ system, user, schema, effort, maxTokens = 32000 }) {
   };
   let message;
   try {
-    message = USE_FALLBACK
-      ? await anthropic().beta.messages.stream({ ...params, betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" }).finalMessage()
-      : await anthropic().messages.stream(params).finalMessage();
+    message = useFallback(cfg.model)
+      ? await anthropic(cfg).beta.messages.stream({ ...params, betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" }).finalMessage()
+      : await anthropic(cfg).messages.stream(params).finalMessage();
   } catch (err) {
-    if (err instanceof Anthropic.AuthenticationError) throw new Error("Anthropic rejected the API key.");
-    if (err instanceof Anthropic.RateLimitError) throw new Error("Anthropic rate limit reached; try again shortly.");
-    if (err instanceof Anthropic.APIError) throw new Error(`Anthropic API error ${err.status ?? ""}: ${err.message}`);
-    throw err;
+    throw anthropicError(err);
   }
   if (message.stop_reason === "refusal") throw new Error(`The model declined this request (${message.stop_details?.category || "no category"}).`);
   if (message.stop_reason === "max_tokens") throw new Error("The model's answer was cut off at the output limit.");
   const out = message.content.filter((b) => b.type === "text").map((b) => b.text).join("");
   return schema ? schema.parse(JSON.parse(out)) : out;
+}
+
+// -------------------------------------------------------- OpenAI-compatible
+
+async function chat(cfg, body) {
+  let res;
+  try {
+    res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(cfg.apiKey && { Authorization: `Bearer ${cfg.apiKey}` }) },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(600_000),
+    });
+  } catch (err) {
+    throw new Error(`Could not reach ${cfg.label} at ${cfg.baseUrl} (${err.cause?.code || err.message}).`);
+  }
+  const raw = await res.text();
+  let json = null;
+  try {
+    json = JSON.parse(raw);
+  } catch {}
+  if (!res.ok) {
+    const detail = (Array.isArray(json) ? json[0] : json)?.error;
+    const error = new Error(`${cfg.label} error ${res.status}: ${detail?.message || (typeof detail === "string" ? detail : raw.slice(0, 300)) || res.statusText}`);
+    error.status = res.status;
+    throw error;
+  }
+  const choice = json?.choices?.[0];
+  if (!choice) throw new Error(`${cfg.label} returned no answer.`);
+  if (choice.finish_reason === "length") throw new Error("The model's answer was cut off at the output limit.");
+  if (choice.finish_reason === "content_filter") throw new Error("The provider's content filter blocked this request.");
+  const content = choice.message?.content;
+  return typeof content === "string" ? content : (content || []).map((part) => part.text || "").join("");
+}
+
+/** Pull the JSON object out of a reply that may be wrapped in prose or a code fence. */
+function parseJsonReply(text) {
+  const from = text.indexOf("{");
+  const to = text.lastIndexOf("}");
+  if (from < 0 || to <= from) throw new Error("The model did not return JSON.");
+  return JSON.parse(text.slice(from, to + 1));
+}
+
+async function openaiComplete(cfg, { system, user, schema }) {
+  if (!schema) return chat(cfg, { model: cfg.model, messages: [{ role: "system", content: system }, { role: "user", content: user }] });
+
+  const messages = [
+    { role: "system", content: `${system}\n\nRespond with a single JSON object and nothing else. It must conform to this JSON Schema:\n${JSON.stringify(z.toJSONSchema(schema))}` },
+    { role: "user", content: user },
+  ];
+  let jsonMode = true;
+  const ask = async () => {
+    try {
+      return await chat(cfg, { model: cfg.model, messages, ...(jsonMode && { response_format: { type: "json_object" } }) });
+    } catch (err) {
+      // Not every compatible server implements JSON mode; the prompt alone still asks for JSON.
+      if (!jsonMode || ![400, 404, 422].includes(err.status)) throw err;
+      jsonMode = false;
+      return chat(cfg, { model: cfg.model, messages });
+    }
+  };
+
+  let reply = await ask();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return schema.parse(parseJsonReply(reply));
+    } catch (err) {
+      if (attempt === 1) throw new Error(`The model's answer did not match the expected format (${err.issues ? z.prettifyError(err).split("\n")[0] : err.message}).`);
+      // One repair round: show the model what was wrong with its answer.
+      messages.push({ role: "assistant", content: reply }, { role: "user", content: `That answer was not valid: ${err.issues ? z.prettifyError(err) : err.message}\nReturn the corrected JSON object only.` });
+      reply = await ask();
+    }
+  }
+}
+
+// ------------------------------------------------------------------ shared
+
+async function complete(request, cfg = activeConfig()) {
+  const why = problem(cfg);
+  if (why) throw new Error(why);
+  const req = { maxTokens: 32000, effort: "high", ...request };
+  return cfg.kind === "anthropic" ? anthropicComplete(cfg, req) : openaiComplete(cfg, req);
+}
+
+const engine = () => ({ engine: "ai", model: activeConfig().model });
+
+/** Send a trivial request to check that a configuration works. */
+export async function testConnection(cfg) {
+  const reply = await complete({ system: "You are a connection test.", user: "Reply with the single word: ready", effort: "low", maxTokens: 2000 }, cfg);
+  return reply.trim().slice(0, 80);
+}
+
+/** List the model names a provider offers, for the Settings screen. */
+export async function listModels(cfg) {
+  if (cfg.kind === "anthropic") {
+    const ids = [];
+    try {
+      for await (const m of anthropic(cfg).models.list()) ids.push(m.id);
+    } catch (err) {
+      throw anthropicError(err);
+    }
+    return ids;
+  }
+  let res;
+  try {
+    res = await fetch(`${cfg.baseUrl}/models`, { headers: cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}, signal: AbortSignal.timeout(20_000) });
+  } catch (err) {
+    throw new Error(`Could not reach ${cfg.label} at ${cfg.baseUrl} (${err.cause?.code || err.message}).`);
+  }
+  if (!res.ok) throw new Error(`${cfg.label} error ${res.status} while listing models.`);
+  const json = await res.json();
+  return (json.data || json.models || []).map((m) => String(m.id || m.name || "").replace(/^models\//, "")).filter(Boolean).sort();
 }
 
 // ------------------------------------------------------------- extraction
@@ -78,9 +203,9 @@ const paperBlock = (p) =>
   ].join("\n");
 
 export async function extractPaper(paper) {
-  if (!aiAvailable() || !paper.abstract) return { engine: "heuristic", extraction: heuristicExtract(paper) };
+  if (!aiAvailable() || !paper.abstract) return { engine: "heuristic", model: null, extraction: heuristicExtract(paper) };
   const extraction = await complete({ system: EXTRACT_SYSTEM, user: paperBlock(paper), schema: Extraction, effort: "low", maxTokens: 16000 });
-  return { engine: "claude", extraction };
+  return { ...engine(), extraction };
 }
 
 // -------------------------------------------------------------- synthesis
@@ -141,9 +266,8 @@ export async function compareFindings(topic, papers, refNo) {
     system: `You compare findings across scientific studies for a researcher who knows the field. ${SYNTH_RULES}`,
     user: `${header(topic, papers)}${corpus(papers, refNo)}\n\nCompare these studies: where they agree, where they conflict and the most plausible reasons, how their methods differ, and how strong the overall evidence is.`,
     schema: Comparison,
-    effort: "high",
   });
-  return { engine: "claude", result };
+  return { ...engine(), result };
 }
 
 export async function findGaps(topic, papers, refNo) {
@@ -152,9 +276,8 @@ export async function findGaps(topic, papers, refNo) {
     system: `You identify research gaps in a body of literature for a researcher planning their next study. ${SYNTH_RULES}\n\nA gap is something these studies leave unanswered: an unstudied population, comparator or outcome, an untested mechanism, a missing design, or an unreplicated finding. This list reflects one search rather than the whole field, so phrase each gap as absent from this corpus. Prefer a few well-argued gaps over a long list.`,
     user: `${header(topic, papers)}${corpus(papers, refNo)}\n\nIdentify the research gaps this corpus reveals, most important first.`,
     schema: Gaps,
-    effort: "high",
   });
-  return { engine: "claude", result };
+  return { ...engine(), result };
 }
 
 export async function writeReview(topic, papers, refNo, searchInfo) {
@@ -166,8 +289,7 @@ Write in Markdown. Cite with bracketed reference numbers such as [3] or [2, 7], 
 
 Structure: a title (# heading), then ## sections for Summary, Background, Search methods, Findings (organised by theme with ### subsections, not study by study), Consistency and conflicts, Quality of the evidence, Research gaps, and Conclusions. The Search methods section should report the search details you are given, as given.`,
     user: `${header(topic, papers)}${corpus(papers, refNo)}\n\nSearch details: ${searchInfo}\n\nWrite the literature review.`,
-    effort: "high",
     maxTokens: 64000,
   });
-  return { engine: "claude", result: { markdown: markdown.trim() } };
+  return { ...engine(), result: { markdown: markdown.trim() } };
 }

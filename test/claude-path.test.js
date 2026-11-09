@@ -3,6 +3,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const seen = [];
 const reply = {
@@ -32,13 +35,15 @@ const server = http.createServer((req, res) => {
 test("extraction and review go through the Messages API", async (t) => {
   await new Promise((r) => server.listen(0, r));
   t.after(() => server.close());
+  process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "ra-test-"));
   process.env.ANTHROPIC_API_KEY = "test-key";
   process.env.ANTHROPIC_BASE_URL = `http://localhost:${server.address().port}`;
   const { extractPaper, writeReview } = await import("../server/ai.js");
   const paper = { id: "p1", title: "T", abstract: "METHODS: 529 patients.", authors: ["A B"], journal: "J", year: 2026, pubTypes: [] };
 
   const ex = await extractPaper(paper);
-  assert.equal(ex.engine, "claude");
+  assert.equal(ex.engine, "ai");
+  assert.equal(ex.model, "claude-opus-5-5");
   assert.equal(ex.extraction.sampleSize, 529);
   const sent = seen[0];
   assert.match(sent.url, /\/v1\/messages/);

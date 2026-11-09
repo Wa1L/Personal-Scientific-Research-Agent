@@ -4,13 +4,27 @@ import { fileURLToPath } from "node:url";
 import { data, save, saveNow, newId, getTopic, getPaper, getAnalysis, topicPapers, logActivity } from "./store.js";
 import { DOMAINS, STUDY_TYPES, buildQueries } from "./filters.js";
 import { SOURCES } from "./sources.js";
-import { aiAvailable, MODEL } from "./ai.js";
+import { testConnection, listModels } from "./ai.js";
+import { aiAvailable, activeConfig, publicSettings, saveSettings, candidate, problem } from "./settings.js";
+import { PACKAGED, DATA_DIR } from "./paths.js";
+import { exec } from "node:child_process";
 import { runTopic, startScheduler, queueExtraction, startAnalysis, evidenceCsv, reviewMarkdown } from "./monitor.js";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static(path.join(here, "..", "public")));
+
+// A packaged build carries the front end inside the executable.
+const assets = globalThis.__ASSETS__;
+if (assets) {
+  const types = { html: "text/html", css: "text/css", js: "text/javascript" };
+  app.use((req, res, next) => {
+    const file = req.path === "/" ? "index.html" : req.path.slice(1);
+    if (req.method !== "GET" || !Object.hasOwn(assets, file)) return next();
+    res.type(types[file.split(".").pop()] || "application/octet-stream").send(assets[file]);
+  });
+} else {
+  app.use(express.static(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public")));
+}
 
 const fail = (res, status, message) => res.status(status).json({ error: message });
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "export";
@@ -56,9 +70,37 @@ app.get("/api/meta", (_req, res) =>
     domains: DOMAINS.map(({ id, label }) => ({ id, label })),
     studyTypes: STUDY_TYPES.map(({ id, label }) => ({ id, label })),
     sources: Object.entries(SOURCES).map(([id, s]) => ({ id, label: s.label })),
-    ai: { available: aiAvailable(), model: MODEL },
   })
 );
+
+app.get("/api/settings", (_req, res) => res.json(publicSettings()));
+
+app.put("/api/settings", (req, res) => {
+  try {
+    saveSettings(req.body);
+  } catch (err) {
+    return fail(res, 400, err.message);
+  }
+  res.json(publicSettings());
+});
+
+// Try a configuration before saving it: "test" sends a one-line prompt,
+// "models" lists what the provider offers.
+app.post("/api/settings/:check", async (req, res) => {
+  const cfg = candidate(req.body);
+  try {
+    if (req.params.check === "models") {
+      if (!cfg || (!cfg.apiKey && !cfg.keyOptional)) throw new Error("Enter an API key first.");
+      return res.json({ models: await listModels(cfg) });
+    }
+    if (req.params.check !== "test") return fail(res, 404, "Not found.");
+    const why = problem(cfg);
+    if (why) throw new Error(why);
+    res.json({ ok: true, reply: await testConnection(cfg) });
+  } catch (err) {
+    fail(res, 400, err.message);
+  }
+});
 
 app.get("/api/state", (_req, res) => {
   const d = data();
@@ -132,6 +174,13 @@ app.post("/api/topics/:topicId/seen", (req, res) => {
   res.json({ ok: true });
 });
 
+// Re-run extraction for papers that only got the rule-based fallback.
+app.post("/api/topics/:topicId/reextract", (req, res) => {
+  const papers = topicPapers(req.topic.id).filter((p) => p.extractionEngine === "heuristic" && p.extractionStatus !== "pending");
+  papers.forEach(queueExtraction);
+  res.status(202).json({ queued: papers.length });
+});
+
 app.get("/api/topics/:topicId/analyses", (req, res) => res.json(data().analyses.filter((a) => a.topicId === req.topic.id)));
 
 app.post("/api/topics/:topicId/analyses", (req, res) => {
@@ -175,12 +224,32 @@ app.get("/api/analyses/:id/review.md", (req, res) => {
 
 app.use("/api", (_req, res) => fail(res, 404, "Not found."));
 
-const port = Number(process.env.PORT) || 3000;
-app.listen(port, () => {
-  console.log(`Research Agent running at http://localhost:${port}`);
-  console.log(aiAvailable() ? `Analysis engine: Claude (${MODEL})` : "Analysis engine: heuristics only — set ANTHROPIC_API_KEY to enable Claude");
-  startScheduler();
-});
+function openBrowser(url) {
+  const cmd = process.platform === "win32" ? `start "" "${url}"` : process.platform === "darwin" ? `open "${url}"` : `xdg-open "${url}"`;
+  exec(cmd, () => {});
+}
+
+const firstPort = Number(process.env.PORT) || 3000;
+function listen(port) {
+  const server = app.listen(port, PACKAGED ? "127.0.0.1" : undefined);
+  server.on("error", (err) => {
+    // The packaged app picks the next free port rather than failing to start.
+    if (err.code === "EADDRINUSE" && PACKAGED && port < firstPort + 20) return listen(port + 1);
+    console.error(err.code === "EADDRINUSE" ? `Port ${port} is already in use. Set PORT to another value.` : err.message);
+    process.exit(1);
+  });
+  server.on("listening", () => {
+    const url = `http://localhost:${port}`;
+    const cfg = activeConfig();
+    console.log(`Research Agent is running at ${url}`);
+    console.log(aiAvailable() ? `Analysis engine: ${cfg.label} (${cfg.model})` : "Analysis engine: heuristics only — connect an AI provider in Settings");
+    console.log(`Data folder: ${DATA_DIR}`);
+    if (PACKAGED) console.log("\nKeep this window open while you use the app. Close it to quit.");
+    startScheduler();
+    if (PACKAGED && process.env.OPEN_BROWSER !== "0") openBrowser(url);
+  });
+}
+listen(firstPort);
 
 for (const sig of ["SIGINT", "SIGTERM"])
   process.on(sig, () => {

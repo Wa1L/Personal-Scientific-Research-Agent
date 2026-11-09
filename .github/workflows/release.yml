@@ -1,0 +1,70 @@
+name: Release
+
+# Pushing a tag like v1.2.0 builds standalone executables for Windows, macOS
+# and Linux plus a Windows installer, and attaches them to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+      - name: Check that the executable starts
+        shell: bash
+        run: |
+          exe=$(ls dist/research-agent-*)
+          DATA_DIR="$RUNNER_TEMP/ra-data" OPEN_BROWSER=0 PORT=3999 "$exe" &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3999/api/settings > /dev/null 2>&1; then echo "Executable is serving requests"; exit 0; fi
+            sleep 1
+          done
+          echo "Executable did not start"; exit 1
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          $v = (Get-Content package.json | ConvertFrom-Json).version
+          $exe = (Resolve-Path "dist\research-agent-$v-windows-x64.exe").Path
+          & $iscc "/DAppVersion=$v" "/DSourceExe=$exe" installer\windows.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Archive macOS and Linux builds
+        if: runner.os != 'Windows'
+        run: |
+          cd dist
+          f=$(ls research-agent-*)
+          tar -czf "$f.tar.gz" "$f"
+          rm "$f"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: research-agent-${{ matrix.os }}
+          path: dist/*
+
+      - name: Publish to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

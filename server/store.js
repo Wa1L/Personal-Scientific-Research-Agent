@@ -3,8 +3,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { DATA_DIR } from "./paths.js";
 
-const DATA_DIR = process.env.DATA_DIR || path.resolve("data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 
 const empty = () => ({ topics: [], papers: [], analyses: [], activity: [] });
